@@ -1,0 +1,7 @@
+{
+  "name": "SoloFlow Studio",
+  "description": "A mobile-first, all-in-one AI content creation studio for text, image, video, and voice, powered by Google Gemini.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
