@@ -1,28 +1,49 @@
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { GoogleGenAI, Modality } from "@google/genai";
 
 // Ensure API key is present
 const API_KEY = process.env.API_KEY || '';
 
 /**
  * Creates a new GenAI instance.
- * IMPORTANT: For Veo (Video), we might need to recreate this after key selection.
  */
 export const createClient = () => {
   return new GoogleGenAI({ apiKey: API_KEY });
 };
 
-export const generateTextStream = async (
-  prompt: string,
+// --- TEXT & CHAT ---
+
+export const generateChatStream = async (
+  history: { role: string; parts: { text: string }[] }[],
+  message: string,
+  config: {
+    useSearch?: boolean;
+    useThinking?: boolean;
+  },
   onChunk: (text: string) => void
 ) => {
   const ai = createClient();
-  const response = await ai.models.generateContentStream({
-    model: 'gemini-2.5-flash',
-    contents: prompt,
-    config: {
-      systemInstruction: "You are an expert content strategist for solopreneurs. Keep answers punchy, engaging, and ready to post.",
-    }
+  
+  let model = 'gemini-2.5-flash'; // Default for fast responses
+  let generationConfig: any = {};
+
+  if (config.useThinking) {
+    model = 'gemini-3-pro-preview';
+    generationConfig.thinkingConfig = { thinkingBudget: 32768 };
+  } else if (config.useSearch) {
+    model = 'gemini-2.5-flash'; // Flash supports search well and is fast
+    generationConfig.tools = [{ googleSearch: {} }];
+  } else {
+    // Standard fast chat
+    model = 'gemini-2.5-flash'; // Or flash-lite if extreme speed needed, but flash is good balance
+  }
+
+  const chat = ai.chats.create({
+    model: model,
+    history: history,
+    config: generationConfig
   });
+
+  const response = await chat.sendMessageStream({ message });
 
   for await (const chunk of response) {
     if (chunk.text) {
@@ -31,9 +52,48 @@ export const generateTextStream = async (
   }
 };
 
+// --- AUDIO UTILS ---
+
+export const transcribeAudio = async (audioBase64: string): Promise<string> => {
+  const ai = createClient();
+  // Remove header if present
+  const base64Data = audioBase64.split(',')[1] || audioBase64;
+  
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash',
+    contents: {
+      parts: [
+        { inlineData: { mimeType: 'audio/webm', data: base64Data } }, // Assuming webm from MediaRecorder
+        { text: "Transcribe this audio exactly. Do not add any commentary." }
+      ]
+    }
+  });
+  return response.text || "";
+};
+
+export const generateSpeech = async (text: string): Promise<string> => {
+  const ai = createClient();
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-preview-tts',
+    contents: { parts: [{ text }] },
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }
+      }
+    }
+  });
+  
+  const base64 = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+  if (!base64) throw new Error("No audio generated");
+  return `data:audio/wav;base64,${base64}`; // API returns raw PCM/WAV usually, but let's assume standard handling
+};
+
+// --- IMAGE UTILS ---
+
 export const generateImage = async (prompt: string, aspectRatio: string = "1:1") => {
   const ai = createClient();
-  // Using the pro model for high quality results as requested for a "Studio"
+  // Gemini 3 Pro for high quality generation
   const response = await ai.models.generateContent({
     model: 'gemini-3-pro-image-preview',
     contents: {
@@ -42,12 +102,11 @@ export const generateImage = async (prompt: string, aspectRatio: string = "1:1")
     config: {
       imageConfig: {
         aspectRatio: aspectRatio,
-        imageSize: "1K" // "2K" is possible but slower, 1K is good for mobile
+        imageSize: "1K" 
       }
     }
   });
 
-  // Extract image
   for (const part of response.candidates?.[0]?.content?.parts || []) {
     if (part.inlineData) {
       return `data:image/png;base64,${part.inlineData.data}`;
@@ -56,7 +115,62 @@ export const generateImage = async (prompt: string, aspectRatio: string = "1:1")
   throw new Error("No image generated");
 };
 
-// --- AUDIO UTILS FOR LIVE API ---
+export const editImage = async (base64Image: string, prompt: string) => {
+  const ai = createClient();
+  const base64Data = base64Image.split(',')[1] || base64Image;
+
+  // Use Nano Banana (Flash Image) for editing
+  const response = await ai.models.generateContent({
+    model: 'gemini-2.5-flash-image',
+    contents: {
+      parts: [
+        { inlineData: { mimeType: 'image/png', data: base64Data } },
+        { text: prompt }
+      ]
+    }
+  });
+
+  for (const part of response.candidates?.[0]?.content?.parts || []) {
+    if (part.inlineData) {
+      return `data:image/png;base64,${part.inlineData.data}`;
+    }
+  }
+  throw new Error("No image generated");
+};
+
+// --- VIDEO UTILS ---
+
+export const generateVideo = async (prompt: string, imageBase64?: string) => {
+  // Always create new client for Veo to ensure fresh key if recently selected
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  let imagePart = undefined;
+  if (imageBase64) {
+    imagePart = {
+      imageBytes: imageBase64.split(',')[1] || imageBase64,
+      mimeType: 'image/png' // Assuming PNG for simplicity
+    };
+  }
+
+  return await ai.models.generateVideos({
+    model: 'veo-3.1-fast-generate-preview',
+    prompt: prompt,
+    image: imagePart,
+    config: {
+      numberOfVideos: 1,
+      resolution: '720p',
+      aspectRatio: '16:9'
+    }
+  });
+};
+
+export const getVideoOperation = async (operation: any) => {
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    return await ai.operations.getVideosOperation({ operation });
+}
+
+
+// --- LIVE API AUDIO HELPERS ---
 
 export function decodeAudio(base64: string) {
   const binaryString = atob(base64);
